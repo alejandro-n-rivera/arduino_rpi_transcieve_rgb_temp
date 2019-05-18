@@ -1,11 +1,15 @@
+import os
+import sys
 import time
 import spidev
 import textwrap
 import datetime
 import RPi.GPIO as GPIO
-from multiprocessing import Process
-from colorama import Fore, Back, Style
+from ctypes import c_bool
 from lib_nrf24 import NRF24 # https://github.com/BLavery/lib_nrf24
+from contextlib import contextmanager
+from colorama import Fore, Back, Style
+from multiprocessing import Process, Value
 """
 IMPORTANT NOTE: Add "self.spidev.max_speed_hz = 4000000" after line 373 ("self.spidev.open(0, csn_pin)")
 in lib_nrf24.py from the library obtained from above to get it working with newer RPis (as of May 2019)
@@ -35,6 +39,7 @@ radio.openWritingPipe(writePipeAddr)
 
 ACK_TIMEOUT = 50 # The amount of time (in ms) that should be spent waiting for an ACK from the Arduino
 transceive_process = None # Child daemon process used to transceive with the Arduino
+suppress_daemon_output = Value(c_bool, False) # Used as a flag for the daemon process to know when to suppress its output (e.g., when the main process isn't in the main menu)
 
 # Convenience color name variables
 OFF = 0
@@ -49,16 +54,16 @@ PINK = 8
 WHITE = 9
     
 def start_new_transceive_process(b0, b1, b2, b3):
-    global transceive_process
+    global transceive_process, suppress_daemon_output
     # If a previous transceive process is running, terminate/join process
     if transceive_process is not None and transceive_process.is_alive():
         transceive_process.terminate()
         transceive_process.join()
-    transceive_process = Process(target=transceive, args=(b0,b1,b2,b3,))
+    transceive_process = Process(target=transceive, args=(b0,b1,b2,b3,suppress_daemon_output,))
     transceive_process.daemon = True
     transceive_process.start()      
 
-def transceive(b0, b1, b2, b3):
+def transceive(b0, b1, b2, b3, suppress_output):
     ACK_rcvd = False # Flag for tracking whether or not [b0, b1, b2, b3] was confirmed as received by the Arduino
     radio.stopListening() # In case previously running transcieve process was listening
     
@@ -70,7 +75,7 @@ def transceive(b0, b1, b2, b3):
             break
         
     # Once out of the while loop, this process is done sending messages. Now it just listens for messages (in this case, temperature values).
-    indefinitely_listen_for_messages()
+    indefinitely_listen_for_messages(suppress_output)
             
 def send_message(b0, b1, b2, b3):
     radio.write(bytes([b0, b1, b2, b3]))
@@ -91,7 +96,7 @@ def wait_for_ACK(b0, b1, b2, b3):
     radio.stopListening()
     return False
 
-def indefinitely_listen_for_messages():
+def indefinitely_listen_for_messages(suppress_output):
     # Now we're indefinitely listening for temperature values from the Arduino
     # This will end only if the main program is exited, or if the user enters a new instruction--prompting the current daemon process to be killed.
     radio.startListening()
@@ -102,7 +107,8 @@ def indefinitely_listen_for_messages():
         radio.read(received_message, radio.getDynamicPayloadSize())
         # Temperature is always sent in two bytes with value range [0, 1023]
         # If the received_message is two bytes, assume it's a temperature value (and therefore not a four-byte instruction ACK)
-        if len(received_message) == 2:
+        #print(suppress_output.value)
+        if len(received_message) == 2 and not suppress_output.value: # Print the message to console if output is not suppressed
             print_rcvd_temperature(received_message)
 
 def print_rcvd_temperature(rcvd_temperature_bytes):
@@ -110,11 +116,8 @@ def print_rcvd_temperature(rcvd_temperature_bytes):
     if raw_val in range(1024): # If raw_val in range [0, 1023], then it's a valid Arduino raw analog measurement value
         degC = raw_val * 0.217226044 - 61.1111111 # Convert raw value to degrees C (formula: https://forum.arduino.cc/index.php?topic=152280.0)
         degF = (degC * 9.0) / 5.0 + 32.0; # Convert degrees C to degrees F
-        #string_to_print = style_string("-"*40, WHITE)+"\n"
-        #string_to_print = string_to_print+style_string("Temperature received at "+str(datetime.datetime.now())+":", RED)+"\n"
-        #string_to_print = string_to_print+style_string(str(rcvd_temperature_bytes), BLUE)+"\n"
-        string_to_print = "    [Temperature received at "+style_string(str(datetime.datetime.now()), YELLOW)+": %.1f°C (%.1f°F)]" % (degC, degF)
-        print(string_to_print, end="\r", flush=True)
+        string_to_print = "    [Temperature received at "+style_string(str(datetime.datetime.now()), YELLOW)+(": %.1f°C (%.1f°F)]" % (degC, degF))
+        print(string_to_print, end="\r", flush=True) # Prints in place instead of multiple lines (flush=True)
     else:
         print(style_string("    [Received invalid temperature measurement: raw value not in range [0, 1023]]", RED), end="\r", flush=True)
         
@@ -134,10 +137,10 @@ def style_string(string, style):
         PINK:   Fore.MAGENTA+string+Style.RESET_ALL,
         CYAN:   Fore.CYAN+string+Style.RESET_ALL,
     }
-    return switch.get(style, string) # Return string with chosen style or original string if style wasn't recognized
+    return switch.get(style, string) # Return string with chosen style (or original string if style wasn't recognized)
         
 def print_invalid_choice():
-    print("Invalid choice entered. Please enter an integer choice from the list, or enter a four-byte code (separated by spaces). Try again.")
+    print("\nInvalid choice entered. Please enter an integer choice from the list, or enter a four-byte code (separated by spaces). Try again.")
     
 def set_LED_off():
     start_new_transceive_process(0, 255, 255, 255)
@@ -175,7 +178,9 @@ def set_LED_HSV():
                 raise ValueError
             break
         except ValueError:
-            print("\nPlease enter only integer values from 0 to 359 for "+style_string("HUE", YELLOW)+" and from 0 to 100 for "+style_string("SATURATION", PINK)+" and "+style_string("VALUE (BRIGHTNESS)", CYAN)+". Try again.")
+            string_to_print = "\nPlease enter only integer values from 0 to 359 for "+style_string("HUE", YELLOW)
+            string_to_print += " and from 0 to 100 for "+style_string("SATURATION", PINK)+" and "+style_string("VALUE (BRIGHTNESS)", CYAN)+". Try again."
+            print(string_to_print)
             continue
         
     if h < 104: # h: [0, 103] => b0: [151, 254], b1: DON'T_CARE
@@ -196,8 +201,8 @@ def blink_HSV():
     start_new_transceive_process(5, 0, 0, 0)
     
 def main():
-    while True:
-        main_menu = """
+    global suppress_daemon_output
+    main_menu = """
         Choose an option:
         [0] Turn off LEDs
         [1] Set RGB values
@@ -206,11 +211,13 @@ def main():
         [4] GoGata
         [5] Test color names
         [6] Blink HSV colors at 60-degree Hue intervals
-        Or you can enter a four-byte code (separated by spaces). Press Ctrl+C to exit.\n
+        Press Ctrl+C to exit.\n
         """
+    while True:
+        suppress_daemon_output.value = False # If we're back in the main menu, the daemon process (if it's running) should be allowed to print
         choice = input(textwrap.dedent(main_menu))
         try:
-            choice = int(choice)
+            choice = int(choice) # Will throw ValueError if it's not an int
             switch = {
                 0: set_LED_off,
                 1: set_LED_RGB,
@@ -220,20 +227,23 @@ def main():
                 5: test_color_names,
                 6: blink_HSV,
             }
-            func = switch.get(choice, print_invalid_choice)
-            func()
+            func = switch.get(choice, print_invalid_choice) # If <choice> isn't in the menu, print invalid choice statement
+            suppress_daemon_output.value = True # If a valid function is chosen, suppress daemon output until we're back in the main menu
+            func() # Else, run the corresponding function obtained from <switch> dictionary
         except ValueError:
-            try:
-                if len(choice.split()) == 4:
-                    choice = [int(b) for b in choice.split()]
-                    for b in choice:
-                        if b not in range(256):
-                            raise ValueError
-                    start_new_transceive_process(choice[0], choice[1], choice[2], choice[3])
-                else:
-                    raise ValueError
-            except ValueError:
-                print_invalid_choice()
+            print_invalid_choice()
+#        except ValueError:
+#            try:
+#                if len(choice.split()) == 4:
+#                    choice = [int(b) for b in choice.split()]
+#                    for b in choice:
+#                        if b not in range(256):
+#                            raise ValueError
+#                    start_new_transceive_process(choice[0], choice[1], choice[2], choice[3])
+#                else:
+#                    raise ValueError
+#            except ValueError:
+#                print_invalid_choice()
         
 if __name__ == '__main__':
     try:
