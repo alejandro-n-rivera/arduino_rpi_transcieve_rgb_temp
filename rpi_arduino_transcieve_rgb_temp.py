@@ -34,7 +34,7 @@ radio.openWritingPipe(writePipeAddr)
 # radio.printDetails()
 
 ACK_TIMEOUT = 50 # The amount of time (in ms) that should be spent waiting for an ACK from the Arduino
-transceive_process = None # Child process used to transceive with the Arduino
+transceive_process = None # Child daemon process used to transceive with the Arduino
 
 # Convenience color name variables
 OFF = 0
@@ -59,54 +59,64 @@ def start_new_transceive_process(b0, b1, b2, b3):
     transceive_process.start()      
 
 def transceive(b0, b1, b2, b3):
-    ACK_rcvd = False # For tracking whether or not [b0, b1, b2, b3] was confirmed as received by the Arduino
-    # Continuously listen for messages -- we're expecting to receive a two-byte temperature value
+    ACK_rcvd = False # Flag for tracking whether or not [b0, b1, b2, b3] was confirmed as received by the Arduino
+    radio.stopListening() # In case previously running transcieve process was listening
+    
+    # Continuously send the instruction message
     while True:
-        radio.startListening()
-        while not radio.available(0):
-            time.sleep(1/100.0)
-        received_message = []
-        radio.read(received_message, radio.getDynamicPayloadSize())
-        # Temperature is always sent in two bytes with value range [0, 1023]
-        # If the received_message is two bytes, we're assuming it's a temperature value (and therefore not a four-byte instruction ACK)
-        if len(received_message) == 2:
-            radio.stopListening()
-            if not ACK_rcvd: # If an ACK hasn't been received for [b0, b1, b2, b3], then send those values
-                send_message(b0, b1, b2, b3)
-                ACK_rcvd = wait_for_ACK(b0, b1, b2, b3) # Wait ACK_TIMEOUT ms for an ACK, update the flag accordingly
-            # print_rcvd_temperature(received_message)
+        send_message(b0, b1, b2, b3)
+        ACK_rcvd = wait_for_ACK(b0, b1, b2, b3) # Wait <ACK_TIMEOUT> ms for an ACK, update the <ACK_rcvd> flag accordingly
+        if ACK_rcvd: # If ACK received, then break out of the while loop
+            break
+        
+    # Once out of the while loop, this process is done sending messages. Now it just listens for messages (in this case, temperature values).
+    indefinitely_listen_for_messages()
             
 def send_message(b0, b1, b2, b3):
     radio.write(bytes([b0, b1, b2, b3]))
     
 def wait_for_ACK(b0, b1, b2, b3):
     radio.startListening()
-    
     start = int(time.time()*1000)
-    
     while int(time.time()*1000) - start <= ACK_TIMEOUT:
         while not radio.available(0):
-            time.sleep(1/100.0)
+            time.sleep(1/1000.0)
         received_message = []
         radio.read(received_message, radio.getDynamicPayloadSize())
-        if received_message == [b0, b1, b2, b3]:
+        if received_message == [b0, b1, b2, b3]: # If the Arduino replies with the same instruction, it has confirmed receipt. Return True.
             radio.stopListening()
             return True
-        
+    
+    # If <ACK_TIMEOUT> is reached without confirmation from the Arduino, return False.
     radio.stopListening()
     return False
 
+def indefinitely_listen_for_messages():
+    # Now we're indefinitely listening for temperature values from the Arduino
+    # This will end only if the main program is exited, or if the user enters a new instruction--prompting the current daemon process to be killed.
+    radio.startListening()
+    while True:
+        while not radio.available(0):
+            time.sleep(1/1000.0)
+        received_message = []
+        radio.read(received_message, radio.getDynamicPayloadSize())
+        # Temperature is always sent in two bytes with value range [0, 1023]
+        # If the received_message is two bytes, assume it's a temperature value (and therefore not a four-byte instruction ACK)
+        if len(received_message) == 2:
+            print_rcvd_temperature(received_message)
+
 def print_rcvd_temperature(rcvd_temperature_bytes):
-    print(style_string("-"*40, WHITE))
-    print(style_string("Temperature received at "+str(datetime.datetime.now())+":", RED))
-    print(style_string(str(rcvd_temperature_bytes), BLUE))
-    raw_volt = int.from_bytes(rcvd_temperature_bytes, byteorder="little")
-    if raw_volt in range(1024): # If raw_volt in range [0, 1023], then it's a valid Arduino analog measurement
-        degC = raw_volt * 0.217226044 - 61.1111111 # Convert raw voltage to degrees C (formula: https://forum.arduino.cc/index.php?topic=152280.0)
+    raw_val = int.from_bytes(rcvd_temperature_bytes, byteorder="little")
+    if raw_val in range(1024): # If raw_val in range [0, 1023], then it's a valid Arduino raw analog measurement value
+        degC = raw_val * 0.217226044 - 61.1111111 # Convert raw value to degrees C (formula: https://forum.arduino.cc/index.php?topic=152280.0)
         degF = (degC * 9.0) / 5.0 + 32.0; # Convert degrees C to degrees F
-        print(style_string("Temperature: %.1f°C (%.1f°F)" % (degC, degF), WHITE))
+        #string_to_print = style_string("-"*40, WHITE)+"\n"
+        #string_to_print = string_to_print+style_string("Temperature received at "+str(datetime.datetime.now())+":", RED)+"\n"
+        #string_to_print = string_to_print+style_string(str(rcvd_temperature_bytes), BLUE)+"\n"
+        string_to_print = "    [Temperature received at "+style_string(str(datetime.datetime.now()), YELLOW)+": %.1f°C (%.1f°F)]" % (degC, degF)
+        print(string_to_print, end="\r", flush=True)
     else:
-        print(style_string("Received invalid temperature measurement: not in range [0, 1023]", WHITE))
+        print(style_string("    [Received invalid temperature measurement: raw value not in range [0, 1023]]", RED), end="\r", flush=True)
         
 def style_string(string, style):
     """
