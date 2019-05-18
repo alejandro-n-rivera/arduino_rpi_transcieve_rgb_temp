@@ -1,14 +1,15 @@
 # rpi_arduino_transcieve_rgb_temp.py
 
-A python program that prompts the user for RGB commands to send to the Arduino using a NRF24L01+ Transceiver. This script also collects temperature data from the Arduino (temporarily commented out the print statements for the received temperature).
+A Python program (tested on a Raspberry Pi 3 Model B) that prompts the user for LED control commands to send to the Arduino using a NRF24L01+ Transceiver. Made possible with the help of [this](https://github.com/BLavery/lib_nrf24) library by BLavery. Credit goes to [BLavery](https://github.com/BLavery) for the _lib_nrf24.py_ file included in this project. The RPi Python script also collects and prints temperature data sent from the Arduino (console print-outs are somewhat iffy at the moment--make sure your console window is large enough for everything to fit on one line).
 
 # arduino_rpi_transcieve_rgb_temp.ino
-An Arduino program that reads and sends temperature data, waits for an RGB control signal, and parses/executes the control signal.
-This program can also be used without the transceiver to control RGB LED lights (see here: https://github.com/alejandro-n-rivera/arduino_led_rgb_hsv).
+An Arduino program that waits for an LED control signal, parses/executes the control signal, and reads/sends temperature data.
+This program can also be used without the transceiver to control LED light strips (see here: https://github.com/alejandro-n-rivera/arduino_led_rgb_hsv).
 
 # General Info
+For information on how to wire NRF24L01+ Transceivers to the Arduino and Raspberry Pi (and a code walkthrough), I suggest [this](https://www.youtube.com/watch?v=_68f-yp63ds) YouTube video. NOTE: I did NOT make this video, nor am I claiming that it's mine or that I have any affiliation with its creator. Credit goes to YouTube user [Alexander Baran-Harper](https://www.youtube.com/channel/UC_aQTJgfrnCb8coPbZ5cgJw).
 
-Allows for setting colors using the RGB color space ([0..255], [0..255], [0..255]) \
+This project allows for setting colors using the RGB color space ([0..255], [0..255], [0..255]) \
 and the HSV (a.k.a. HSB) color space ([0..359], [0.00..1.00], [0.00..1.00])
 
 The HSV color space is useful for controlling LED brightness (V) apart from hue (H) and saturation (S).
