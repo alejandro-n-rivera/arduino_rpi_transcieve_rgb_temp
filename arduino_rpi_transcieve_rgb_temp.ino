@@ -29,6 +29,7 @@
 
 #define DEF_TIMEOUT 50 // Default radio listening timeout (in ms)
 #define ACK_TIMEOUT 25 // The amount of time (in ms) that should be spent sending an ACK (i.e., the instruction that was received) back to the RPi
+#define TEMP_SEND_PERIOD 3 // The amount of time (in sec) between each temperature data broadcast
 
 RF24 radio(9, 10); // (CE, CSN) on NRF24L01+ chip
 
@@ -64,7 +65,8 @@ void loop()
   // Listen for a new instruction for up to <DEF_TIMEOUT> ms with the NRF24L01+ chip
   listenForInstruction(DEF_TIMEOUT); // This function is also used as a replacement for delay() for the delay time between colors for some LED animation modes (e.g., cycleHSV)
 
-  // After listening for an instruction, read/send temperature to the RPi NRF24L01+ chip before parsing the current <instruction> on the next loop() iteration
+  // After listening for an instruction, check to see if it's been at least <TEMP_SEND_PERIOD> sec since the last time temperature was sent
+  // If it has, read/send temperature to the RPi with the NRF24L01+ chip before parsing the current <instruction> on the next loop() iteration
   readAndSendTemperature();
 }
 
@@ -152,10 +154,15 @@ void parseInstruction()
 
 bool listenForInstruction(int timeout)
 {
-  radio.startListening();
-  startTime = millis();
+  startTime = millis() - 1; // Record function start time (minus one ms to try and keep the actual time used by the function as close to <timeout> ms as possible)
+  
+  // First, check to see if it's been at least <TEMP_SEND_PERIOD> sec since the last time temperature was sent
+  // If it has been, read/send temperature to the RPi with the NRF24L01+ chip
+  readAndSendTemperature();
+  
   while(millis() - startTime <= timeout) // Listen until <timeout> (in ms) is reached
-  {
+  {    
+    radio.startListening();
     if(radio.available()) // A new instruction was received
     {
       radio.read(&instruction, sizeof(instruction)); // Read the received message into <instruction>
@@ -193,14 +200,15 @@ bool listenForInstruction(int timeout)
 
 void readAndSendTemperature()
 {
-  // If it's been at least 1 second since temperature data was last sent, send it (avoids sending a bunch of temp data per second if the current LED instruction has a very short loop()
-  if(millis() - lastTempSend >= 1000)
+  // Return true if we just sent a value, else return false
+  // If it's been at least <TEMP_SEND_PERIOD> seconds since temperature data was last sent, send it (avoids sending a bunch of temp data per second)
+  if(millis() - lastTempSend >= TEMP_SEND_PERIOD*1000)
   {
+    radio.stopListening();
     tempSensorVal = analogRead(A0); // Read temperature -- always in range [0, 1023]
     radio.write(&tempSensorVal, 2); // Send temperature -- only need two bytes
     lastTempSend = millis(); // Update lastTempSend time with current time
   }
-
   /* The code below converts the tempSensorVal into degrees C and degrees F. I have offloaded this to the RPi instead to keep time used for this function to a minimum. */
   
 //  Serial.println(tempSensorVal);
