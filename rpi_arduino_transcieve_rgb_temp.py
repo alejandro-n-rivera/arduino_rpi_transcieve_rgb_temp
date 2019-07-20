@@ -4,6 +4,7 @@ import time
 import spidev
 import textwrap
 import datetime
+import threading
 import RPi.GPIO as GPIO
 from ctypes import c_bool
 from lib_nrf24 import NRF24 # https://github.com/BLavery/lib_nrf24
@@ -25,7 +26,7 @@ radio = NRF24(GPIO, spidev.SpiDev())
 radio.begin(0, 17) # GPIO values passed in
 
 radio.setPayloadSize(32)
-radio.setChannel(76)
+radio.setChannel(125) # Channel possibilities: [0, 125] => [2.400, 2.525] GHz
 radio.setDataRate(NRF24.BR_1MBPS)
 radio.setPALevel(NRF24.PA_MAX)
 
@@ -37,9 +38,11 @@ radio.openReadingPipe(1, readPipeAddr)
 radio.openWritingPipe(writePipeAddr)
 # radio.printDetails()
 
-ACK_TIMEOUT = 50 # The amount of time (in ms) that should be spent waiting for an ACK from the Arduino
+ACK_TIMEOUT = 100 # The amount of time (in ms) that should be spent waiting for an ACK from the Arduino
 transceive_process = None # Child daemon process used to transceive with the Arduino
+pattern_thread = None # Thread used for running multiple transceive_process calls in order to make patterns (ALPHA)
 suppress_daemon_output = Value(c_bool, False) # Used as a flag for the daemon process to know when to suppress its output (e.g., when the main process isn't in the main menu)
+stop_pattern_thread = None # Used for signaling the pattern_thread to stop
 
 # Convenience color name variables
 OFF = 0
@@ -52,7 +55,7 @@ PURPLE = 6
 CYAN = 7
 PINK = 8
 WHITE = 9
-    
+  
 def start_new_transceive_process(b0, b1, b2, b3):
     global transceive_process, suppress_daemon_output
     # If a previous transceive process is running, terminate/join process
@@ -98,28 +101,31 @@ def wait_for_ACK(b0, b1, b2, b3):
 
 def indefinitely_listen_for_messages(suppress_output):
     # Now we're indefinitely listening for temperature values from the Arduino
-    # This will end only if the main program is exited, or if the user enters a new instruction--prompting the current daemon process to be killed.
-    radio.startListening()
-    while True:
-        while not radio.available(0):
-            time.sleep(1/1000.0)
-        received_message = []
-        radio.read(received_message, radio.getDynamicPayloadSize())
-        # Temperature is always sent in two bytes with value range [0, 1023]
-        # If the received_message is two bytes, assume it's a temperature value (and therefore not a four-byte instruction ACK)
-        #print(suppress_output.value)
-        if len(received_message) == 2 and not suppress_output.value: # Print the message to console if output is not suppressed
-            print_rcvd_temperature(received_message)
+    # This will end only if the main program is exited, or if the user enters a new non-pattern instruction--prompting the current daemon process to be killed.
+    try:
+        radio.startListening()
+        while True:
+            while not radio.available(0):
+                time.sleep(1/1000.0)
+            received_message = []
+            radio.read(received_message, radio.getDynamicPayloadSize())
+            # Temperature is always sent in two bytes with value range [0, 1023]
+            # If the received_message is two bytes, assume it's a temperature value (and therefore not a four-byte instruction ACK)
+            #print(suppress_output.value)
+            if len(received_message) == 2 and not suppress_output.value: # Print the message to console if output is not suppressed
+                print_rcvd_temperature(received_message)
+    except KeyboardInterrupt:
+        print("\nCtrl+C press detected.")
 
 def print_rcvd_temperature(rcvd_temperature_bytes):
-    raw_val = int.from_bytes(rcvd_temperature_bytes, byteorder="little")
+    raw_val = int.from_bytes(rcvd_temperature_bytes, byteorder="little") - 10
     if raw_val in range(1024): # If raw_val in range [0, 1023], then it's a valid Arduino raw analog measurement value
         degC = raw_val * 0.217226044 - 61.1111111 # Convert raw value to degrees C (formula: https://forum.arduino.cc/index.php?topic=152280.0)
         degF = (degC * 9.0) / 5.0 + 32.0; # Convert degrees C to degrees F
         string_to_print = "    [Temperature received at "+style_string(str(datetime.datetime.now()), YELLOW)+(": %.1f°C (%.1f°F)]" % (degC, degF))
         print(string_to_print, end="\r", flush=True) # Prints in place instead of multiple lines (flush=True)
     else:
-        print(style_string("    [Received invalid temperature measurement: raw value not in range [0, 1023]]", RED), end="\r", flush=True)
+        print(style_string("    [Received invalid raw temperature value (Not in range [0, 1023])", RED), end="\r", flush=True)
         
 def style_string(string, style):
     """
@@ -140,7 +146,17 @@ def style_string(string, style):
     return switch.get(style, string) # Return string with chosen style (or original string if style wasn't recognized)
         
 def print_invalid_choice():
-    print("\nInvalid choice entered. Please enter an integer choice from the list, or enter a four-byte code (separated by spaces). Try again.")
+    print("\nInvalid choice entered. Please enter an integer choice from the list. Try again.")
+    
+def signal_check_delay(s):
+    # Function used in place of time.sleep() for pattern threads that checks whether or not we should stop
+    global stop_pattern_thread
+    start = time.time()
+    timeout = s
+    while(time.time() - start < timeout):
+        if stop_pattern_thread:
+            return True
+    return False
     
 def set_LED_off():
     start_new_transceive_process(0, 255, 255, 255)
@@ -189,7 +205,21 @@ def set_LED_HSV():
        start_new_transceive_process(255, h-104, s, v)
     
 def cycle_HSV():
-    start_new_transceive_process(2, 20, 100, 100)
+    while True:
+        try:
+            d = int(input("\nWhat value for "+style_string("DELAY (in ms)", PINK)+" [0-255]? "))
+            if d not in range(256): # [0, 255]
+                raise ValueError
+            v = int(input("What value for "+style_string("VALUE (BRIGHTNESS)", CYAN)+" [0-100]? "))
+            if v not in range(101): # [0, 100]
+                raise ValueError
+            break
+        except ValueError:
+            string_to_print = "\nPlease enter only integer values from 0 to 255 for "+style_string("DELAY (in ms)", PINK)
+            string_to_print += " and from 0 to 100 for "+style_string("VALUE (BRIGHTNESS)", CYAN)+". Try again."
+            print(string_to_print)
+            continue
+    start_new_transceive_process(2, d, 100, v)
     
 def go_gata():
     start_new_transceive_process(3, 0, 0, 0)
@@ -200,8 +230,25 @@ def test_color_names():
 def blink_HSV():
     start_new_transceive_process(5, 0, 0, 0)
     
+def christmas_colors():
+    global pattern_thread
+    pattern_thread = threading.Thread(target=christmas_colors_thread)
+    pattern_thread.start()
+
+def christmas_colors_thread():
+    while True:
+        start_new_transceive_process(1, 255, 0, 0) # red
+        if signal_check_delay(0.5):
+            break
+        start_new_transceive_process(1, 0, 255, 0) # green
+        if signal_check_delay(0.5):
+            break
+        start_new_transceive_process(1, 255, 255, 255) # white
+        if signal_check_delay(0.5):
+            break
+    
 def main():
-    global suppress_daemon_output
+    global suppress_daemon_output, pattern_thread, stop_pattern_thread
     main_menu = """
         Choose an option:
         [0] Turn off LEDs
@@ -211,6 +258,7 @@ def main():
         [4] GoGata
         [5] Test color names
         [6] Blink HSV colors at 60-degree Hue intervals
+        [7] Christmas Colors (ALPHA)
         Press Ctrl+C to exit.\n
         """
     while True:
@@ -226,28 +274,32 @@ def main():
                 4: go_gata,
                 5: test_color_names,
                 6: blink_HSV,
+                7: christmas_colors,
             }
             func = switch.get(choice, print_invalid_choice) # If <choice> isn't in the menu, print invalid choice statement
             suppress_daemon_output.value = True # If a valid function is chosen, suppress daemon output until we're back in the main menu
-            func() # Else, run the corresponding function obtained from <switch> dictionary
+            
+            # If there's a pattern thread running, terminate it before executing the next choice (as long as the choice was valid)
+            if func != print_invalid_choice and pattern_thread is not None and pattern_thread.is_alive():
+                stop_pattern_thread = True
+                pattern_thread.join()
+                stop_pattern_thread = False
+            
+            func() # Run the corresponding function obtained from <switch> dictionary
         except ValueError:
             print_invalid_choice()
-#        except ValueError:
-#            try:
-#                if len(choice.split()) == 4:
-#                    choice = [int(b) for b in choice.split()]
-#                    for b in choice:
-#                        if b not in range(256):
-#                            raise ValueError
-#                    start_new_transceive_process(choice[0], choice[1], choice[2], choice[3])
-#                else:
-#                    raise ValueError
-#            except ValueError:
-#                print_invalid_choice()
         
 if __name__ == '__main__':
     try:
         main()
     except KeyboardInterrupt:
         print("\nNow exiting.")
+        # If there's a pattern thread running, terminate it
+        if pattern_thread is not None and pattern_thread.is_alive():
+            stop_pattern_thread = True
+            pattern_thread.join()
+        # If there's a transceive process is running, terminate/join process
+        if transceive_process is not None and transceive_process.is_alive():
+            transceive_process.terminate()
+            transceive_process.join()
         exit(0)
