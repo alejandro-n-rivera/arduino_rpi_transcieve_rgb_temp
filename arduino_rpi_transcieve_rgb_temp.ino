@@ -50,7 +50,7 @@ void setup()
   // Setup the NRF24L01+ Transceiver
   radio.begin();
   radio.setPALevel(RF24_PA_MAX);
-  radio.setChannel(76);
+  radio.setChannel(125); // Channel possibilities: [0, 125] => [2.400, 2.525] GHz
   radio.openReadingPipe(0, 0xC2C2C2C2C2);
   radio.openWritingPipe(0xE7E7E7E7E7);
   radio.enableDynamicPayloads();
